@@ -1,19 +1,14 @@
-import RPi.GPIO as GPIO
+from gpiozero import Servo
 from time import sleep
 
-GPIO.setmode(GPIO.BCM) 
+servo = Servo(13)
 
-#Setup pins X and Y as an Output Pin instead of the default Input
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(12, GPIO.OUT)
-
-
-#This function sends the signal on and off in 2 second intervals.
-def valve_OnOff(PIN):
-    while True:
-        GPIO.output(12,GPIO.HIGH)
-        sleep(2)
-        GPIO.output(12, GPIO.LOW)
-        sleep(2)
-        valve_OnOff(12)
-        GPIO.cleanup()
+for x in range(6):
+    servo.min()
+    sleep(1.0)
+    servo.mid()
+    sleep(2.0)
+    servo.max()
+    sleep(1.0)
+    print("Testing servo loop" + str(x))
+print("Finished testing servo")

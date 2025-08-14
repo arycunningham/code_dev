@@ -1,56 +1,46 @@
 #!/usr/bin/env python3
-#chat
 import rospy
-import RPi.GPIO as GPIO
 from std_msgs.msg import Bool
+from gpiozero import Servo
+from time import sleep
 
-# Constants
-SERVO_PIN = 13       # GPIO pin connected to the servo (BOARD numbering)
-PWM_FREQ = 50        # 50 Hz is typical for hobby servos
 
-# Global references
-pwm = None
+
 sub_a = None
+servo = Servo(12)
 
 def callback_a(msg_in):
-    global pwm
-    if msg_in.data:
-        rospy.loginfo("Received True - Moving servo to 180 degrees")
-        pwm.ChangeDutyCycle(12.5)  # Adjust if necessary for your servo
-    else:
-        rospy.loginfo("Received False - Moving servo to 0 degrees")
-        pwm.ChangeDutyCycle(2.5)   # Adjust if necessary for your servo
+	# A bool message contains one field called "data" which can be true or false
+	# http://docs.ros.org/melodic/api/std_msgs/html/msg/Bool.html
+	# XXX: The following "GPIO.output" should be replaced to meet the needs of your actuators!
+	if msg_in.data:
+		rospy.loginfo("Setting output high!")
+		servo.max()
+		sleep(1)
+		servo.min()
+		sleep(1)
+	else:
+		rospy.loginfo("Setting output low!")
+		sleep(1)
+
 
 def shutdown():
-    global sub_a, pwm
-    rospy.loginfo("Shutting down the servo controller node...")
-    if sub_a is not None:
-        sub_a.unregister()
-    if pwm is not None:
-        pwm.stop()
-    GPIO.cleanup()
-    rospy.loginfo("GPIO cleanup complete. Shutdown successful.")
+	# Clean up our ROS subscriber if they were set, avoids error messages in logs
+	if sub_a is not None:
+		sub_a.unregister()
+
+	# XXX: Could perform some failsafe actions here!
+
 
 if __name__ == '__main__':
-    # Initialize ROS node
-    rospy.init_node('servo_controller', anonymous=True)
-    rospy.loginfo("Servo controller node started...")
+	# Setup the ROS backend for this node
+	rospy.init_node('actuator_controller', anonymous=True)
 
-    # GPIO setup
-    GPIO.setmode(GPIO.BOARD)
-    GPIO.setup(SERVO_PIN, GPIO.OUT)
+	# Setup the publisher for a single actuator (use additional subscribers for extra actuators)
+	sub_a = rospy.Subscriber('/actuator_control/actuator_a', Bool, callback_a)
 
-    # Start PWM at neutral position (7.5% duty cycle ≈ 90 degrees)
-    pwm = GPIO.PWM(SERVO_PIN, PWM_FREQ)
-    pwm.start(7.5)
-    rospy.loginfo("PWM started at neutral position (90 degrees).")
+	# Make sure we clean up all our code before exiting
+	rospy.on_shutdown(shutdown)
 
-    # Subscribe to actuator control topic
-    sub_a = rospy.Subscriber('/actuator_control/actuator_a', Bool, callback_a)
-    rospy.loginfo("Subscribed to /actuator_control/actuator_a")
-
-    # Register shutdown behavior
-    rospy.on_shutdown(shutdown)
-
-    # Keep the node running
-    rospy.spin()
+	# Loop forever
+	rospy.spin()
