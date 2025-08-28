@@ -16,7 +16,7 @@ def callback_a(msg_in):
 	# XXX: The following "GPIO.output" should be replaced to meet the needs of your actuators!
 	if msg_in.data:
 		rospy.loginfo("Setting output high!")
-		servo.angl=-90
+		servo.angle=-90
 		sleep(1)
 		servo.angle=0
 		sleep(1)
