@@ -3,12 +3,17 @@ import rospy
 import RPi.GPIO as GPIO
 from std_msgs.msg import Bool
 from gpiozero import AngularServo
+from gpiozero import Device
+import pigpio
+from gpiozero.pins.pigpio import PiGPIOFactory
+Device.pin_factory = PiGPIOFactory('127.0.0.1')
+
 from time import sleep
 
 
-
+factory = PiGPIOFactory()
 sub_a = None
-servo = AngularServo(12, min_angle=-90, max_angle=90)
+servo = AngularServo(12, min_angle=-90, max_angle=90,pin_factory=factory)
 
 def callback_a(msg_in):
 	# A bool message contains one field called "data" which can be true or false
@@ -16,9 +21,9 @@ def callback_a(msg_in):
 	# XXX: The following "GPIO.output" should be replaced to meet the needs of your actuators!
 	if msg_in.data:
 		rospy.loginfo("Setting output high!")
-		servo.angle=-90
+		servo.angle=90
 		sleep(1)
-		servo.angle=0
+		servo.angle=-90
 		sleep(1)
 	else:
 		rospy.loginfo("Setting output low!")
