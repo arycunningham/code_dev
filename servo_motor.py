@@ -17,6 +17,8 @@ servo = AngularServo(12, min_angle=-90, max_angle=90,pin_factory=factory)
 
 def callback_a(msg_in):
 	# A bool message contains one field called "data" which can be true or false
+	#data set to true
+	#rostopic pub /actuator_control/actuator_a std_msgs/Bool '{data: True}'
 	# http://docs.ros.org/melodic/api/std_msgs/html/msg/Bool.html
 	# XXX: The following "GPIO.output" should be replaced to meet the needs of your actuators!
 	if msg_in.data:
