@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 #needs to run 
 	#sudo pigpiod
-	#export PORT_ADDR=soft
-	#export PORT_ADDR=soft
+	#export PIGPIO_ADDR=soft
+	#export PIGPIO_PORT=%%%%
 		#rostopic pub /actuator_control/actuator_a std_msgs/Bool '{data: True}'
 import rospy
 import RPi.GPIO as GPIO
@@ -19,7 +19,7 @@ from time import sleep
 factory = PiGPIOFactory()
 sub_a = None
 servo_a = AngularServo(12, min_angle=-90, max_angle=90,pin_factory=factory)
-servo_b = AngularServo(12, min_angle=-90, max_angle=90,pin_factory=factory)
+servo_b = AngularServo(13, min_angle=-90, max_angle=90,pin_factory=factory)
 
 def callback_a(msg_in):
 	# A bool message contains one field called "data" which can be true or false
@@ -67,7 +67,7 @@ if __name__ == '__main__':
 
 	# Setup the publisher for a single actuator (use additional subscribers for extra actuators)
 	sub_a = rospy.Subscriber('/actuator_control/actuator_a', Bool, callback_a)
-	sub_b = rospy.Subscriber('/actuator_control/actuator_b', Bool, callback_b
+	sub_b = rospy.Subscriber('/actuator_control/actuator_b', Bool, callback_b)
 
 	# Make sure we clean up all our code before exiting
 	rospy.on_shutdown(shutdown)
