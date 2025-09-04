@@ -36,7 +36,6 @@ def callback_a(msg_in):
 		sleep(1)
 
 sub_b = None
-servo_b = AngularServo(12, min_angle=-90, max_angle=90,pin_factory=factory)
 
 def callback_b(msg_in):
 	if msg_in.data:
