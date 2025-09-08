@@ -25,7 +25,7 @@ def callback_a(msg_in):
 	# A bool message contains one field called "data" which can be true or false
 	# http://docs.ros.org/melodic/api/std_msgs/html/msg/Bool.html
 	if msg_in.data:
-		rospy.loginfo("Rotating Servo A")
+		rospy.loginfo("Rotating Servo A 90")
 		servo_a.angle=90
 		sleep(1)
 		servo_a.angle=0
@@ -39,14 +39,14 @@ sub_b = None
 
 def callback_b(msg_in):
 	if msg_in.data:
-		rospy.loginfo("Rotating Servo B")
-		servo_b.angle=-90
+		rospy.loginfo("Rotating Servo A -90")
+		servo_a.angle=-90
 		sleep(1)
-		servo_b.angle=0
+		servo_a.angle=0
 		sleep(1)
 	else:
 		rospy.loginfo("Center Point")
-		servo_b.angle=0
+		servo_a.angle=0
 		sleep(1)
 
 
