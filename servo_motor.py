@@ -28,11 +28,11 @@ def callback_a(msg_in):
 		rospy.loginfo("Rotating Servo A")
 		servo_a.angle=90
 		sleep(1)
-		servo_a.angle=-90
+		servo_a.angle=0
 		sleep(1)
 	else:
 		rospy.loginfo("Center Point")
-		servo_a.angle=-90
+		servo_a.angle=0
 		sleep(1)
 
 sub_b = None
@@ -40,13 +40,13 @@ sub_b = None
 def callback_b(msg_in):
 	if msg_in.data:
 		rospy.loginfo("Rotating Servo B")
-		servo_b.angle=90
-		sleep(1)
 		servo_b.angle=-90
+		sleep(1)
+		servo_b.angle=0
 		sleep(1)
 	else:
 		rospy.loginfo("Center Point")
-		servo_b.angle=-90
+		servo_b.angle=0
 		sleep(1)
 
 
