@@ -29,9 +29,9 @@ def callback_a(msg_in):
 	# http://docs.ros.org/melodic/api/std_msgs/html/msg/Bool.html
 	if msg_in.data:
 		rospy.loginfo("Rotating Servo A 90")
-		servo_a.angle=90
+		servo_a.angle=-90
 		sleep(1)
-		servo_a.angle=0
+		servo_a.angle=90
 		sleep(1)
 	else:
 		rospy.loginfo("Center Point")
@@ -42,14 +42,14 @@ sub_b = None
 
 def callback_b(msg_in):
 	if msg_in.data:
-		rospy.loginfo("Rotating Servo A -90")
-		servo_a.angle=-90
+		rospy.loginfo("Rotating Servo B 90")
+		servo_b.angle=-90
 		sleep(1)
-		servo_a.angle=0
+		servo_b.angle=90
 		sleep(1)
 	else:
 		rospy.loginfo("Center Point")
-		servo_a.angle=0
+		servo_b.angle=0
 		sleep(1)
 
 
