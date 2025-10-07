@@ -5,6 +5,7 @@ import cv2
 import rospy
 from sensor_msgs.msg import CompressedImage, Image
 from cv_bridge import CvBridge, CvBridgeError
+from std_msgs.msg import Float32MultiArray, String, Bool
 
 import numpy as np
 
@@ -15,12 +16,13 @@ class ArucoDetector():
 
     frame_sub_topic = '/depthai_node/image/compressed'
     raw_sub_topic = '/depthai_node/image/raw'
-    
+    marker_num_topic = '/target_detection/marker_num'
 
     def __init__(self):
         self.aruco_pub = rospy.Publisher(
             '/processed_aruco/image/compressed', CompressedImage, queue_size=10)
         self.aruco_pub_raw = rospy.Publisher('processed_aruco/image/raw', Image, queue_size=10)
+        self.marker_num_pub = rospy.Publisher('/target_detection/marker_num', String, queue_size=10)
         self.br = CvBridge()
 
         if not rospy.is_shutdown():
@@ -61,6 +63,7 @@ class ArucoDetector():
                 cv2.line(frame, bottom_left, top_left, (0, 255, 0), 2)
 
                 rospy.loginfo("Aruco detected, ID: {}".format(marker_ID))
+                self.marker_num_pub.publish(marker_ID)
 
                 cv2.putText(frame, str(
                     marker_ID), (top_left[0], top_right[1] - 15), cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 140, 0), 2)
