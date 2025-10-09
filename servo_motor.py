@@ -15,15 +15,15 @@ from time import sleep
 
 factory = PiGPIOFactory()
 sub_a = None
-servo_a = AngularServo(12, min_angle=-90, max_angle=90,pin_factory=factory)
-servo_b = AngularServo(13, min_angle=-90, max_angle=90,pin_factory=factory)
+servo_a = AngularServo(12, min_angle=-180, max_angle=0,pin_factory=factory)
+servo_b = AngularServo(13, min_angle=-180, max_angle=0,pin_factory=factory)
 
 def callback_a(msg_in): #Callback_a subscriber actuator control code (smoke)
 	if msg_in.data:
 		rospy.loginfo("Rotating Servo A 90")
-		servo_a.angle=-90 #rotates servo
-		sleep(1)
-		servo_a.angle=90
+		servo_a.angle=-180 #rotates servo
+		sleep(2)
+		servo_a.angle=0
 		sleep(1)
 	else:
 		rospy.loginfo("Center Point")
@@ -35,9 +35,9 @@ sub_b = None
 def callback_b(msg_in): #Callback_b subscriber actuator control code (fire)
 	if msg_in.data:
 		rospy.loginfo("Rotating Servo B 90")
-		servo_b.angle=-90
+		servo_b.angle=-180
 		sleep(1)
-		servo_b.angle=90
+		servo_b.angle=0
 		sleep(1)
 	else:
 		rospy.loginfo("Center Point")
