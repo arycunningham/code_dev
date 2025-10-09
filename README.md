@@ -1,10 +1,11 @@
 EGB349-Group-4
 Collective Code Development
 
+# Payload
 <details>
-  <summary>Payload</summary>
+  <summary>Click to see more</summary>
   
-# Libraries
+## Libraries
 The utilised libraries include:
 - gpiozero
 - rospy
@@ -30,7 +31,7 @@ sudo systemctd enable pigpiod.service
 ```
 sudo systemctd start pigpiod.service
 ```
-# Payload Activation and ROS Subscriber Setup
+## Payload Activation and ROS Subscriber Setup
 The following code conducts the setup of two subscribers named
   - callback_a
   - callback_b
