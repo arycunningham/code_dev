@@ -4,13 +4,10 @@
 	#rostopic pub /actuator_control/actuator_a std_msgs/Bool '{data: True}'
 
 #import required libraries for actuator control and ROS
-import socket
 import rospy
-import RPi.GPIO as GPIO
 from std_msgs.msg import Bool
 from gpiozero import AngularServo
 from gpiozero import Device
-import pigpio
 from gpiozero.pins.pigpio import PiGPIOFactory
 Device.pin_factory = PiGPIOFactory('127.0.0.1', '8888') #sets pin and port identities for servo control
 
