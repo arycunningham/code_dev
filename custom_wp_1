@@ -1,0 +1,647 @@
+#!/usr/bin/env python3
+
+import sys
+from math import *
+
+import rospy
+import actionlib
+from actionlib_msgs.msg import GoalStatus
+
+from geometry_msgs.msg import Point, PoseStamped
+from tf.transformations import euler_from_quaternion
+
+from nav_msgs.msg import Path
+
+from sensor_msgs.msg import CompressedImage
+from spar_msgs.msg import FlightMotionAction, FlightMotionGoal
+
+# Libaries for interfacing with Breadcrumb
+from breadcrumb.srv import RequestPath
+from breadcrumb.srv import RequestPathRequest
+
+from sensor_msgs.msg import BatteryState
+
+from std_msgs.msg import Float32, Bool, Int32, String 
+
+class Guidance():
+    def __init__(self, waypoints):
+        # Make sure we have a valid waypoint list
+        if not self.check_waypoints(waypoints):
+            raise ValueError("Invalid waypoint list input!")
+
+        # Internal counter to see what waypoint were are up to
+        self.waypoint_counter = 0
+
+        # Creates a yaw value to be used later
+        self.current_yaw = 0.0
+
+        # Creates critical battery percentage
+        self.critical_battery = 0.45
+
+        # Set a flag to indicate that we are doing a specific inspection
+        # and that we are not following our waypoint list
+        self.performing_roi = False
+        
+        # Track visited ROI types to avoid revisiting
+        self.visited_roi_types = set()
+        
+        # Battery status
+        self.topic_battery = '/mavros/battery'
+        self.battery_per = 0
+        self.sub_battery = rospy.Subscriber('/mavros/battery', BatteryState, self.callback_battery)
+
+        # Save the input waypoints
+        self.waypoints = waypoints
+        # Display full path
+        self.display_path(waypoints,"/guidance/fullPath")
+
+        self.mission_complete = False
+        self.landing_phase = False
+        self.landing_marker_detected = False
+        self.landing_wp = None
+        
+        # Landing marker ID configuration
+        self.landing_marker = 'marker_4'  # The ID of the landing marker
+        
+        # Make some space to record down our current location
+        self.current_location = Point()
+        
+        # Set our linear and rotational velocities for the flight
+        self.vel_linear = rospy.get_param("~vel_linear", 0.4)
+        self.vel_yaw = rospy.get_param("~vel_yaw", 0.2)
+        
+        # Set our position and yaw waypoint accuracies
+        self.accuracy_pos = rospy.get_param("~acc_pos", 0.1)
+        self.accuracy_yaw = rospy.get_param("~acc_yaw", 0.1)
+        
+        # Get survey Altitude
+        self.surveyAlt = rospy.get_param("~surveyAltitude", 2.0)
+
+        # Create our action client
+        action_ns = rospy.get_param("~action_topic", 'spar/flight')
+        self.spar_client = actionlib.SimpleActionClient(action_ns, FlightMotionAction)
+        rospy.loginfo("Waiting for spar...")
+        self.spar_client.wait_for_server()
+
+        # Wait to connect with Breadcrumb
+        rospy.wait_for_service('/breadcrumb/request_path')
+        self.srvc_bc = rospy.ServiceProxy('/breadcrumb/request_path', RequestPath)
+
+        if not rospy.is_shutdown():
+            # Good to go, start mission
+            rospy.loginfo("Starting waypoint mission")
+
+            # Callback to save "current location" such that we can perform and return
+            # from a diversion to the correct location
+            
+            # Uncomment for flight day
+            # self.sub_pose = rospy.Subscriber("/mavros/local_position/pose", PoseStamped, self.callback_pose)
+            #Use for emulation
+            self.sub_pose = rospy.Subscriber("/uavasr/pose", PoseStamped, self.callback_pose)
+            
+
+            
+            # Publisher to output our waypoint progress
+            self.pub_progress = rospy.Publisher("/waypoint_progress", Float32, queue_size=10)		
+
+            # Subscriber updates the type of ROI detected
+            self.sub_roi_type = rospy.Subscriber('/target_detection/type', String, self.callback_roi_type)
+            
+            # Subscriber to update the ROI pose everytime it changes
+            self.sub_roi_pose = rospy.Subscriber('/target_detection/roi', PoseStamped, self.callback_aruco_landing)
+            self.roi_type = ""
+
+            self.pub_performing_roi = rospy.Publisher('/guidance/performing_roi', Bool, queue_size=10)
+
+            # Publishes to servo motor
+            self.pub_a = rospy.Publisher('/actuator_control/actuator_a', Bool, queue_size=10)
+            self.pub_b = rospy.Publisher('/actuator_control/actuator_b', Bool, queue_size=10)
+            
+            # Subscriber to catch "ROI" diversion commands
+            self.sub_roi = rospy.Subscriber("/target_detection/roi", PoseStamped, self.callback_inspect_roi)
+            # Setup first waypoint segment
+            self.send_wp(self.waypoints[0])
+            self.waypoint_counter += 1
+            
+            # Initialisation of breadcrumb waypoints
+            self.breadcrumbWaypointsCounter = 0
+            self.breadcrumbMode = False
+            self.breadcrumbWaypoints = []
+
+            # Setup a timer to check if our waypoint has completed at 20Hz
+            self.timer = rospy.Timer( rospy.Duration(1.0/20.0), self.check_waypoint_status )
+
+            # If shutdown is issued (eg. CTRL+C), cancel current mission before rospy is shutdown.
+            rospy.on_shutdown( lambda : self.shutdown() )
+
+    def extract_roi_type_category(self, roi_type):
+        #
+        # Extract the main category from ROI type string.
+        # Examples:
+        #- "fire" -> "fire"
+        #- "smoke" -> "smoke" 
+        
+        roi_type_lower = roi_type.lower()
+        
+        # Check for fire
+        if 'fire' in roi_type_lower:
+            return 'fire'
+        
+        # Check for smoke
+        if 'smoke' in roi_type_lower:
+            return 'smoke'
+        
+        # Return original type if no specific pattern matched
+        return roi_type_lower
+
+    def mark_roi_type_visited(self, roi_type):
+        # Mark an ROI type as visited
+        category = self.extract_roi_type_category(roi_type)
+        self.visited_roi_types.add(category)
+        rospy.loginfo(f"Marked ROI type '{category}' as visited. Total visited types: {list(self.visited_roi_types)}")
+
+    def has_visited_roi_type(self, roi_type):
+        # Check if this type of ROI has already been visited
+        category = self.extract_roi_type_category(roi_type)
+        has_visited = category in self.visited_roi_types
+        if has_visited:
+            rospy.loginfo(f"ROI type '{category}' has already been visited - skipping")
+        else:
+            rospy.loginfo(f"ROI type '{category}' is new - proceeding with inspection")
+        return has_visited
+
+    # Updates the battery percentage everytime it changes
+    def callback_battery(self, msg_in):
+        self.battery_per = msg_in.percentage
+        self.uav_health()
+    
+    # When the battery drops below critical level the drone automatically lands
+    def uav_health(self):
+        if self.battery_per <= self.critical_battery:
+            rospy.loginfo("Battery under critical level, Safe landing start.")
+            goal = FlightMotionGoal()
+            goal.motion = FlightMotionGoal.MOTION_LAND
+            goal.velocity_vertical = rospy.get_param("~speed", 0.2)
+            self.spar_client.send_goal(goal)
+            self.spar_client.wait_for_result()
+            rospy.loginfo("Emergency land completed")
+
+    # This function will check if a list of waypoints is in the format we expect
+    def check_waypoints(self, wps):
+        # Make sure waypoints are a list
+        if not isinstance(wps, list):
+            rospy.logwarn("Waypoints are not list")
+            return False
+
+        # Make sure we have at least one waypoint
+        if len(wps) < 1:
+            rospy.logwarn("Waypoints list is empty")
+            return False
+
+        # Check each of our waypoints
+        for i in range(len(wps)):
+            if not self.check_waypoint(wps[i]):
+                rospy.logwarn("Waypoint %i did not pass check" % (i + 1))
+                return False
+
+        # If we haven't returned false yet, then waypoints look good!
+        return True
+
+    # This function will check if a waypoint is in the format we expect
+    def check_waypoint(self, wp):
+        # Make sure each waypoint is a list
+        if not isinstance(wp, list):
+            rospy.logwarn("Waypoint is not a list of coordinates")
+            return False
+
+        # Make sure each waypoint has 4 values
+        if len(wp) != 4:
+            rospy.logwarn("Waypoint has an invalid length (must be X/Y/Z/Yaw)")
+            return False
+        
+        # Check if waypoint is inside the net
+        if abs(wp[0]) > 5.5 or abs(wp[1]) > 5.5 or abs(wp[2]) > 5.5:
+            rospy.logwarn("Waypoint has an invalid size for O134 (must be -4<X<4 |-2.5<Y<2.5| 0<Z<4 |Yaw)")
+            return False
+        
+        # If we haven't returned false yet, then waypoint looks valid!
+        return True
+
+    # This function will make sure we shut down the node as safely as possible
+    def shutdown(self):
+        # Unregister anything that needs it here
+        rospy.loginfo("Unregistering from topics and shutting down...")
+        self.sub_pose.unregister()
+        self.sub_roi.unregister()
+        self.pub_progress.unregister()
+        self.sub_battery.unregister()
+        self.spar_client.cancel_goal()
+        rospy.loginfo("Guidance stopped")
+    
+    # Transforms quaternion to euler to get yaw
+    def yaw_calc(self, q):
+        _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
+        return yaw
+    
+    # This function will check receive the current pose of the UAV constantly
+    def callback_pose(self, msg_in):
+        # Store the current position at all times so it can be accessed later
+        self.current_location = msg_in.pose.position
+        self.current_yaw = self.yaw_calc(msg_in.pose.orientation)
+    
+    def callback_roi_type(self, msg_in):
+        self.roi_type = msg_in.data
+        rospy.loginfo(f"Detected ROI type: {self.roi_type}")
+    
+    def callback_aruco_landing(self, msg_in):
+        # Only set landing waypoint if it's a valid landing marker
+        if self.roi_type == self.landing_marker:
+            self.landing_marker_detected = True
+            self.landing_wp = [msg_in.pose.position.x, msg_in.pose.position.y, self.surveyAlt, 0.0]
+            rospy.loginfo(f"Landing waypoint set: {self.landing_wp}")
+
+    # This function will fire whenever a ROI pose message is sent
+    # It is also responsible for handling the ROI "inspection task"
+    def callback_inspect_roi(self, msg_in):
+        # Validate marker type before processing
+            # Check if this is the landing marker during landing phase
+        if self.landing_phase and self.roi_type == self.landing_marker:
+            rospy.loginfo("Landing marker detected during ROI inspection - initiating landing procedure")
+            self.initiate_landing_sequence(msg_in)
+            return
+        else:
+            rospy.loginfo(f"Processing ROI type: {self.roi_type}")
+
+        # Check if we've already visited this type of ROI using the captured marker number
+        if self.has_visited_roi_type(self.roi_type):
+            rospy.loginfo(f"Skipping ROI diversion - already visited type: {self.roi_type}")
+            return
+
+        # Set our flag that we are performing the diversion
+        self.performing_roi = True 
+        self.pub_performing_roi.publish(True)
+        rospy.loginfo("Starting diversion to ROI...")
+
+        # Mark this ROI type as visited using the captured marker number
+        self.mark_roi_type_visited(self.roi_type)
+
+        # Cancel the current goal (if there is one)
+        self.spar_client.cancel_goal()
+
+        # Record our current location so we can return to it later
+        start_location = self.current_location
+        start_yaw = self.current_yaw
+
+        # Set the "diversion waypoint" (at yaw zero)
+        dwp = [msg_in.pose.position.x, msg_in.pose.position.y, 0.5, start_yaw]
+        # Set the "return waypoint" (at yaw zero)
+        rwp = [start_location.x, start_location.y, start_location.z, start_yaw]
+
+        rospy.sleep(rospy.Duration(1))
+
+        self.send_wp(dwp)
+        rospy.loginfo("Heading to diversion waypoint: %s", dwp)
+
+        self.spar_client.wait_for_result()
+        if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+            # Something went wrong, cancel out of guidance!
+            rospy.signal_shutdown("cancelled")
+            return
+
+        rospy.loginfo("Reached diversion ROI!")
+
+        rospy.sleep(rospy.Duration(6))
+
+        # Determine which servo to activate based on ROI type
+        roi_type_lower = self.roi_type.lower()
+        activate_servo_a = False
+        activate_servo_b = False
+
+        if 'fire' in roi_type_lower:
+            activate_servo_a = True
+            rospy.loginfo("Fire detected - activating Servo A for fire extinguisher deployment")
+        elif 'smoke' in roi_type_lower:
+            activate_servo_b = True
+            rospy.loginfo("Smoke detected - activating Servo B for smoke detector deployment")
+        else:
+            rospy.loginfo(f"Unknown payload ROI type '{self.roi_type}' - no payload deployment")
+
+        # Activate the appropriate servos
+        self.pub_a.publish(activate_servo_a)
+        self.pub_b.publish(activate_servo_b)
+
+        if activate_servo_a or activate_servo_b:
+            rospy.loginfo("Dispensing Payload")
+            rospy.sleep(rospy.Duration(6))
+
+        # Deactivate deployment script
+        self.pub_a.publish(False)
+        self.pub_b.publish(False)
+
+        rospy.loginfo("Stopping servo motors")
+
+        rospy.loginfo("Returning to flight plan...")
+
+        # Return back to waypoint
+        self.send_wp(rwp)
+        rospy.loginfo("Heading back to waypoint: %s", rwp)
+
+        self.spar_client.wait_for_result()
+        if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+            # Something went wrong, cancel out of guidance!
+            rospy.signal_shutdown("cancelled")
+            return
+
+        rospy.loginfo("Resuming flight plan to waypoint %i!" % (self.waypoint_counter))
+        self.send_wp(self.waypoints[self.waypoint_counter])
+
+        # Unset our flag that we are performing a diversion
+        # to allow the waypoint timer to take back over
+        self.performing_roi = False
+
+    def initiate_landing_sequence(self, msg_in):
+        """
+        Initiate landing procedure when landing marker is detected
+        """
+        rospy.loginfo("Initiating landing sequence...")
+        
+        # Cancel current goals
+        self.spar_client.cancel_goal()
+        
+        # Set landing waypoint above the marker
+        landing_approach_wp = [msg_in.pose.position.x, msg_in.pose.position.y, self.surveyAlt, 0.0]
+        
+        # First go to position above the marker
+        self.send_wp(landing_approach_wp)
+        rospy.loginfo(f"Moving to position above landing marker: {landing_approach_wp}")
+        
+        self.spar_client.wait_for_result()
+        if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+            rospy.logwarn("Failed to reach landing approach position")
+            return
+        
+        rospy.loginfo("Reached landing approach position, beginning descent...")
+        
+        # Begin landing
+        goal = FlightMotionGoal()
+        goal.motion = FlightMotionGoal.MOTION_LAND
+        goal.velocity_vertical = rospy.get_param("~speed", 0.2)
+        self.spar_client.send_goal(goal)
+        self.spar_client.wait_for_result()
+        
+        if self.spar_client.get_state() == GoalStatus.SUCCEEDED:
+            rospy.loginfo("Landing complete")
+            rospy.signal_shutdown("landed")
+        else:
+            rospy.logwarn("Landing failed")
+            rospy.signal_shutdown("landing_failed")
+
+    # This function is for convenience to simply send out a new waypoint
+    def send_wp(self, wp):
+        # Make sure the waypoint is valid before continuing
+        if not self.check_waypoint(wp):
+            rospy.logwarn("Invalid waypoint, skipped...")
+            return False
+
+        # Build the flight goal
+        goal = FlightMotionGoal()
+        goal.motion = FlightMotionGoal.MOTION_GOTO
+        goal.position.x = wp[0]
+        goal.position.y = wp[1]
+        goal.position.z = wp[2]
+        goal.yaw = wp[3]
+        goal.velocity_vertical = self.vel_linear
+        goal.velocity_horizontal = self.vel_linear
+        goal.yawrate = self.vel_yaw
+        goal.wait_for_convergence = True
+        goal.position_radius = self.accuracy_pos
+        goal.yaw_range = self.accuracy_yaw
+
+        # For this function, we don't wait in the loop.
+        # Instead we just send the waypoint and check up on it later
+        self.spar_client.send_goal(goal)
+        
+        # If shutdown is issued, cancel current mission before rospy is shutdown
+        rospy.on_shutdown(lambda : self.spar_client.cancel_goal())
+
+    # This function will fire whenever we receive a timer event (te) from rospy.Timer()
+    # The main purpose is to check if a waypoint has been reached,
+    # and if so, send out the next waypoint to continue the mission
+    def check_waypoint_status(self, te):
+        # If we're performing the ROI diversion, then don't do
+        # anything here, as this is handled in that function
+        if not self.performing_roi:
+            # If the last segment has succeeded.
+            if self.spar_client.get_state() == GoalStatus.SUCCEEDED:
+                rospy.loginfo("Reached waypoint %i!" % (self.waypoint_counter))
+                    
+                if self.waypoint_counter < (len(self.waypoints)):
+                    if not self.breadcrumbMode:
+                        # Set up a path request for breadcrumb
+                        req = RequestPathRequest()
+                        req.start.x = self.waypoints[self.waypoint_counter-1][0]
+                        req.start.y = self.waypoints[self.waypoint_counter-1][1]
+                        req.start.z = self.waypoints[self.waypoint_counter-1][2]
+                        req.end.x = self.waypoints[self.waypoint_counter][0]
+                        req.end.y = self.waypoints[self.waypoint_counter][1]
+                        req.end.z = self.waypoints[self.waypoint_counter][2]
+
+                        res = self.srvc_bc(req)
+
+                        breadcrumbWaypoints = []
+                        if len(res.path_sparse.poses) > 0:
+                            # Print the path to the screen
+                            rospy.loginfo("Segment {} to {}:".format(self.waypoint_counter - 1, self.waypoint_counter))
+                            rospy.loginfo("[%0.2f;%0.2f;%0.2f] => [%0.2f;%0.2f;%0.2f]",
+                                        req.start.x,req.start.y,req.start.z,
+                                        req.end.x,req.end.y,req.end.z)
+
+                            # Loop through the solution returned from breadcrumb
+                            for i in range(len(res.path_sparse.poses)):
+                                rospy.loginfo("    [%0.2f;%0.2f;%0.2f]",
+                                            res.path_sparse.poses[i].position.x,
+                                            res.path_sparse.poses[i].position.y,
+                                            res.path_sparse.poses[i].position.z)
+                                breadcrumbWaypoints.append([res.path_sparse.poses[i].position.x, res.path_sparse.poses[i].position.y, res.path_sparse.poses[i].position.z, 0.0])
+                            
+                            self.breadcrumbWaypoints = breadcrumbWaypoints
+                            self.display_path(breadcrumbWaypoints, "/guidance/pathBreadcrumb")
+                            self.breadcrumbMode = True
+                            self.breadcrumbWaypointsCounter = 0
+                            self.send_wp(self.breadcrumbWaypoints[self.breadcrumbWaypointsCounter])
+                            self.breadcrumbWaypointsCounter += 1
+
+                        elif len(res.path.poses) > 0:
+                            rospy.loginfo("Sparse Pathing Unavailable, Using Default Pathing")
+                            # Print the path to the screen
+                            rospy.loginfo("Segment {} to {}:".format(self.waypoint_counter - 1, self.waypoint_counter))
+                            rospy.loginfo("[%0.2f;%0.2f;%0.2f] => [%0.2f;%0.2f;%0.2f]",
+                                        req.start.x,req.start.y,req.start.z,
+                                        req.end.x,req.end.y,req.end.z)
+
+                            # Loop through the solution returned from breadcrumb
+                            for i in range(len(res.path.poses)):
+                                rospy.loginfo("    [%0.2f;%0.2f;%0.2f]",
+                                            res.path.poses[i].position.x,
+                                            res.path.poses[i].position.y,
+                                            res.path.poses[i].position.z)
+                                breadcrumbWaypoints.append([res.path.poses[i].position.x, res.path.poses[i].position.y, res.path.poses[i].position.z, 0.0])
+                            
+                            self.breadcrumbWaypoints = breadcrumbWaypoints
+                            self.display_path(breadcrumbWaypoints, "/guidance/pathBreadcrumb")
+                            self.breadcrumbMode = True
+                            self.breadcrumbWaypointsCounter = 0
+                            self.send_wp(self.breadcrumbWaypoints[self.breadcrumbWaypointsCounter])
+                            self.breadcrumbWaypointsCounter += 1
+
+                        else:
+                            rospy.logerr("solution not found for waypoint %d", self.breadcrumbWaypointsCounter)
+
+                            # Skip this waypoint and try the next one if available
+                            self.waypoint_counter += 1
+                            if self.waypoint_counter < len(self.waypoints):
+                                self.send_wp(self.waypoints[self.waypoint_counter])
+                                self.waypoint_counter += 1
+                            else:
+                                rospy.logwarn("No more waypoints to process.")						
+
+                    else:
+                        if self.breadcrumbWaypointsCounter < (len(self.breadcrumbWaypoints)):
+                            self.send_wp(self.breadcrumbWaypoints[self.breadcrumbWaypointsCounter])
+                            # Increment our waypoint counter
+                            self.breadcrumbWaypointsCounter += 1
+                        else:
+                            # If normal breadcrumb waypoints completed
+                            self.waypoint_counter += 1
+                            self.breadcrumbMode = False
+                else:
+                    if not self.mission_complete:
+                        # If we have reached the last waypoint, and are not in breadcrumb mode
+                        # then we can start landing sequence
+                        rospy.loginfo("All waypoints complete, starting landing procedure...")
+                        self.mission_complete = True
+                        self.landing_phase = True
+                        
+                        # Check if we already have a valid landing marker detected
+                        if self.landing_marker_detected and self.landing_wp is not None:
+                            rospy.loginfo("Valid landing marker already detected, heading to landing waypoint...")
+                            self.send_wp(self.landing_wp)
+                            self.spar_client.wait_for_result()
+                            if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+                                # Something went wrong, cancel out of guidance!
+                                rospy.signal_shutdown("cancelled")
+                                return
+                            rospy.loginfo("Reached landing waypoint, starting landing...")
+                            self.initiate_landing_sequence_from_waypoint()
+                        else:
+                            rospy.loginfo("No valid landing marker detected, waiting for marker detection or landing at current position...")
+                            # You could add a timeout here to land at current position if no marker is detected
+                            rospy.sleep(rospy.Duration(5))  # Wait 5 seconds for marker detection
+                            if not self.landing_marker_detected:
+                                rospy.loginfo("No landing marker detected within timeout, landing at current position...")
+                                self.initiate_landing_sequence_from_waypoint()
+                    # Else the mission is over, shutdown and quit the node
+                    rospy.loginfo("Mission complete!")
+                    rospy.signal_shutdown("complete")
+            elif (self.spar_client.get_state() == GoalStatus.PREEMPTED) or (self.spar_client.get_state() == GoalStatus.ABORTED) or (self.spar_client.get_state() == GoalStatus.REJECTED):
+                rospy.loginfo("Mission cancelled!")
+                rospy.signal_shutdown("cancelled")
+
+    def initiate_landing_sequence_from_waypoint(self):
+        """Initiate landing from current position"""
+        goal = FlightMotionGoal()
+        goal.motion = FlightMotionGoal.MOTION_LAND
+        goal.velocity_vertical = rospy.get_param("~speed", 0.2)
+        self.spar_client.send_goal(goal)
+        self.spar_client.wait_for_result()
+        if self.spar_client.get_state() != GoalStatus.SUCCEEDED:
+            # Something went wrong, cancel out of guidance!
+            rospy.signal_shutdown("cancelled")
+            return
+        rospy.loginfo("Landing complete")
+        # Landed safely, shutdown the node
+        rospy.signal_shutdown("landed")
+
+    # Visualize waypoints
+    def display_path(self, wps, name):
+        rospy.loginfo("Displaying Path...")
+        pub_path = rospy.Publisher(name , Path, queue_size=10,latch=True)
+        msg = Path()
+        msg.header.frame_id = "map"
+        msg.header.stamp =rospy.Time.now()
+
+        for wp in wps:
+            pose = PoseStamped()
+            pose.header.frame_id = "map"
+            pose.pose.position.x = wp[0]
+            pose.pose.position.y = wp[1]
+            pose.pose.position.z = wp[2]
+
+            pose.pose.orientation.w = 0.0
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = 0.0
+
+            msg.poses.append(pose)
+            rospy.loginfo("Publishing Path...")
+            pub_path.publish(msg)
+
+
+def main(args):
+    # Initialise ROS
+    rospy.init_node('guidance')
+    surveyAltitude = rospy.get_param("~surveyAlt", 2.0)
+    # List of waypoints
+    # [X, Y, Z, Yaw]
+    wps = [
+        [ 0.0,   0.0,  surveyAltitude, 0.0],
+        [ 4.0,  -2.5,  surveyAltitude, 0.0],
+        [ 4.0,   0.0,  surveyAltitude, 0.0],
+        [ 4.0,   2.5,  surveyAltitude, 0.0],
+        [ 3.5,   2.5,  surveyAltitude, 0.0],  
+        [ 3.0,   2.5,  surveyAltitude, 0.0],
+        [ 3.0,   0.5,  surveyAltitude, 0.0],  
+        [ 3.0,  -2.5,  surveyAltitude, 0.0],
+        [ 2.5,  -2.5,  surveyAltitude, 0.0],  
+        [ 2.0,  -2.5,  surveyAltitude, 0.0],
+        [ 2.0,   0.0,  surveyAltitude, 0.0],  
+        [ 2.0,   2.5,  surveyAltitude, 0.0],
+        [ 1.5,   2.5,  surveyAltitude, 0.0],
+        [ 1.0,   2.5,  surveyAltitude, 0.0],
+        [ 1.0,   0.0,  surveyAltitude, 0.0],
+        [ 1.0,  -2.5,  surveyAltitude, 0.0],
+        [ 0.5,  -2.5,  surveyAltitude, 0.0],
+        [ 0.0,  -2.5,  surveyAltitude, 0.0],
+        [ 0.0,   0.0,  surveyAltitude, 0.0],
+        [ 0.0,   2.5,  surveyAltitude, 0.0],
+        [-0.5,   2.5,  surveyAltitude, 0.0],
+        [-1.0,   2.5,  surveyAltitude, 0.0],
+        [-1.0,   0.0,  surveyAltitude, 0.0],
+        [-1.0,  -2.5,  surveyAltitude, 0.0],
+        [-1.5,  -2.5,  surveyAltitude, 0.0],
+        [-2.0,  -2.5,  surveyAltitude, 0.0],
+        [-2.0,   0.0,  surveyAltitude, 0.0],
+        [-2.0,   2.5,  surveyAltitude, 0.0],
+        [-2.5,   2.5,  surveyAltitude, 0.0],
+        [-3.0,   2.5,  surveyAltitude, 0.0],
+        [-3.0,   0.0,  surveyAltitude, 0.0],
+        [-3.0,  -2.5,  surveyAltitude, 0.0],
+        [-3.5,  -2.5,  surveyAltitude, 0.0],
+        [-4.0,  -2.5,  surveyAltitude, 0.0],
+        [-4.0,   0.0,  surveyAltitude, 0.0],
+        [-4.0,   2.5,  surveyAltitude, 0.0]]
+
+    # Create our guidance class option
+    guide = Guidance(wps)
+
+    # Spin!
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    try:
+        main(sys.argv)
+    except rospy.ROSInterruptException:
+        pass
+
+    print('')
